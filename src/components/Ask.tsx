@@ -1,9 +1,12 @@
 'use client';
 
 import React, { useState, useRef, useEffect } from 'react';
-import { FaArrowRight, FaChevronLeft, FaChevronRight } from 'react-icons/fa';
+import {FaChevronLeft, FaChevronRight } from 'react-icons/fa';
 import Markdown from './Markdown';
 import { useLanguage } from '@/contexts/LanguageContext';
+import RepoInfo from '@/types/repoinfo';
+import getRepoUrl from '@/utils/getRepoUrl';
+import ModelSelectionModal from './ModelSelectionModal';
 
 interface Message {
   role: 'user' | 'assistant' | 'system';
@@ -18,23 +21,33 @@ interface ResearchStage {
 }
 
 interface AskProps {
-  repoUrl: string;
-  githubToken?: string;
-  gitlabToken?: string;
-  bitbucketToken?: string;
-  generatorModelName?: string;
+  repoInfo: RepoInfo;
+  provider?: string;
+  model?: string;
+  isCustomModel?: boolean;
+  customModel?: string;
   language?: string;
 }
 
-// const SERVER_BASE_URL = process.env.NEXT_PUBLIC_SERVER_BASE_URL || 'http://localhost:8001';
-
-const Ask: React.FC<AskProps> = ({ repoUrl, githubToken, gitlabToken, bitbucketToken, generatorModelName, language = 'en' }) => {
+const Ask: React.FC<AskProps> = ({ 
+  repoInfo,
+  provider = '',
+  model = '',
+  isCustomModel = false,
+  customModel = '',
+  language = 'en' 
+}) => {
   const [question, setQuestion] = useState('');
   const [response, setResponse] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [deepResearch, setDeepResearch] = useState(false);
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const [hasResponse, setHasResponse] = useState(false);
+  
+  // Model selection state
+  const [selectedProvider, setSelectedProvider] = useState(provider);
+  const [selectedModel, setSelectedModel] = useState(model);
+  const [isCustomSelectedModel, setIsCustomSelectedModel] = useState(isCustomModel);
+  const [customSelectedModel, setCustomSelectedModel] = useState(customModel);
+  const [isModelSelectionModalOpen, setIsModelSelectionModalOpen] = useState(false);
 
   // Get language context for translations
   const { messages } = useLanguage();
@@ -65,7 +78,6 @@ const Ask: React.FC<AskProps> = ({ repoUrl, githubToken, gitlabToken, bitbucketT
   const clearConversation = () => {
     setQuestion('');
     setResponse('');
-    setHasResponse(false);
     setConversationHistory([]);
     setResearchIteration(0);
     setResearchComplete(false);
@@ -85,27 +97,27 @@ const Ask: React.FC<AskProps> = ({ repoUrl, githubToken, gitlabToken, bitbucketT
 
     // Check for conclusion sections that don't indicate further research
     if ((content.includes('## Conclusion') || content.includes('## Summary')) &&
-        !content.includes('I will now proceed to') &&
-        !content.includes('Next Steps') &&
-        !content.includes('next iteration')) {
+      !content.includes('I will now proceed to') &&
+      !content.includes('Next Steps') &&
+      !content.includes('next iteration')) {
       return true;
     }
 
     // Check for phrases that explicitly indicate completion
     if (content.includes('This concludes our research') ||
-        content.includes('This completes our investigation') ||
-        content.includes('This concludes the deep research process') ||
-        content.includes('Key Findings and Implementation Details') ||
-        content.includes('In conclusion,') ||
-        (content.includes('Final') && content.includes('Conclusion'))) {
+      content.includes('This completes our investigation') ||
+      content.includes('This concludes the deep research process') ||
+      content.includes('Key Findings and Implementation Details') ||
+      content.includes('In conclusion,') ||
+      (content.includes('Final') && content.includes('Conclusion'))) {
       return true;
     }
 
     // Check for topic-specific completion indicators
     if (content.includes('Dockerfile') &&
-        (content.includes('This Dockerfile') || content.includes('The Dockerfile')) &&
-        !content.includes('Next Steps') &&
-        !content.includes('In the next iteration')) {
+      (content.includes('This Dockerfile') || content.includes('The Dockerfile')) &&
+      !content.includes('Next Steps') &&
+      !content.includes('In the next iteration')) {
       return true;
     }
 
@@ -213,28 +225,16 @@ const Ask: React.FC<AskProps> = ({ repoUrl, githubToken, gitlabToken, bitbucketT
 
       // Prepare the request body
       const requestBody: Record<string, unknown> = {
-        repo_url: repoUrl,
+        repo_url: getRepoUrl(repoInfo),
         messages: newHistory,
-        // local_ollama: false,
-        // use_openrouter: false,
+        provider: selectedProvider,
+        model: isCustomSelectedModel ? customSelectedModel : selectedModel,
         language: language
       };
 
-      // Add generator model name if provided
-      if (generatorModelName) {
-        requestBody.generator_model_name = generatorModelName;
-      }
-
-
       // Add tokens if available
-      if (githubToken && repoUrl.includes('github.com')) {
-        requestBody.github_token = githubToken;
-      }
-      if (gitlabToken && repoUrl.includes('gitlab.com')) {
-        requestBody.gitlab_token = gitlabToken;
-      }
-      if (bitbucketToken && repoUrl.includes('bitbucket.org')) {
-        requestBody.bitbucket_token = bitbucketToken;
+      if (repoInfo?.token) {
+        requestBody.token = repoInfo.token;
       }
 
       // Make the API call
@@ -339,7 +339,7 @@ const Ask: React.FC<AskProps> = ({ repoUrl, githubToken, gitlabToken, bitbucketT
         return () => clearTimeout(timer);
       }
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [response, isLoading, deepResearch, researchComplete, researchIteration]);
 
   // Effect to update research stages when the response changes
@@ -371,14 +371,19 @@ const Ask: React.FC<AskProps> = ({ repoUrl, githubToken, gitlabToken, bitbucketT
       }
     }
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [response, isLoading, deepResearch, researchIteration]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
     if (!question.trim() || isLoading) return;
-
+    
+    handleConfirmAsk();
+  };
+  
+  // Handle confirm and send request
+  const handleConfirmAsk = async () => {
     setIsLoading(true);
     setResponse('');
     setResearchIteration(0);
@@ -397,27 +402,16 @@ const Ask: React.FC<AskProps> = ({ repoUrl, githubToken, gitlabToken, bitbucketT
 
       // Prepare request body
       const requestBody: Record<string, unknown> = {
-        repo_url: repoUrl,
+        repo_url: getRepoUrl(repoInfo),
         messages: newHistory,
+        provider: selectedProvider,
+        model: isCustomSelectedModel ? customSelectedModel : selectedModel,
         language: language
       };
 
-      // Add generator model name if provided
-      console.log('Generator model name:', generatorModelName);
-      if (generatorModelName) {
-        requestBody.generator_model_name = generatorModelName;
-      }
-
-
       // Add tokens if available
-      if (githubToken && repoUrl.includes('github.com')) {
-        requestBody.github_token = githubToken;
-      }
-      if (gitlabToken && repoUrl.includes('gitlab.com')) {
-        requestBody.gitlab_token = gitlabToken;
-      }
-      if (bitbucketToken && repoUrl.includes('bitbucket.org')) {
-        requestBody.bitbucket_token = bitbucketToken;
+      if (repoInfo?.token) {
+        requestBody.token = repoInfo.token;
       }
 
       const apiResponse = await fetch(`/api/chat/stream`, {
@@ -442,7 +436,6 @@ const Ask: React.FC<AskProps> = ({ repoUrl, githubToken, gitlabToken, bitbucketT
 
       // Read the stream
       let fullResponse = '';
-      setHasResponse(true);
 
       while (true) {
         const { done, value } = await reader.read();
@@ -463,9 +456,6 @@ const Ask: React.FC<AskProps> = ({ repoUrl, githubToken, gitlabToken, bitbucketT
         }
       }
 
-      // Set hasResponse to true after successful response
-      setHasResponse(true);
-
       // If deep research is enabled, check if we should continue
       if (deepResearch) {
         const isComplete = checkIfResearchComplete(fullResponse);
@@ -480,7 +470,6 @@ const Ask: React.FC<AskProps> = ({ repoUrl, githubToken, gitlabToken, bitbucketT
     } catch (error) {
       console.error('Error during API call:', error);
       setResponse(prev => prev + '\n\nError: Failed to get a response. Please try again.');
-      setHasResponse(true);
       setResearchComplete(true);
     } finally {
       setIsLoading(false);
@@ -488,30 +477,56 @@ const Ask: React.FC<AskProps> = ({ repoUrl, githubToken, gitlabToken, bitbucketT
   };
 
   return (
-    <div className="w-full max-w-full">
-      <div className="rounded-lg overflow-hidden">
-        {/* Input area */}
-        <form onSubmit={handleSubmit} className="p-0">
+    <div className="bg-[var(--card-bg)] border border-[var(--border-color)] rounded-md overflow-hidden shadow-sm">
+      <div className="p-4">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-xl font-serif text-[var(--accent-primary)]">
+            {messages.ask?.title || 'Ask about this repository'}
+          </h2>
+          
+          {/* Model selection button next to title */}
+          <button
+            type="button"
+            onClick={() => setIsModelSelectionModalOpen(true)}
+            className="text-xs px-2.5 py-1 rounded border border-[var(--border-color)]/40 bg-[var(--background)]/10 text-[var(--foreground)]/80 hover:bg-[var(--background)]/30 hover:text-[var(--foreground)] transition-colors flex items-center gap-1.5"
+          >
+            <span>{selectedProvider}/{isCustomSelectedModel ? customSelectedModel : selectedModel}</span>
+            <svg className="h-3.5 w-3.5 text-[var(--accent-primary)]/70" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+            </svg>
+          </button>
+        </div>
+
+        {/* Question input */}
+        <form onSubmit={handleSubmit} className="mt-4">
           <div className="relative">
             <input
               ref={inputRef}
               type="text"
               value={question}
               onChange={(e) => setQuestion(e.target.value)}
-              placeholder={messages?.ask?.placeholder || "Ask about this repository..."}
-              className="w-full p-3 pr-12 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md text-gray-800 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-purple-500"
+              placeholder={messages.ask?.placeholder || 'Ask a question about this repo...'}
+              className="block w-full rounded-md border-2 border-[var(--border-color)] bg-[var(--input-bg)] text-[var(--foreground)] px-4 py-3 text-base focus:border-[var(--accent-primary)] focus:ring-[var(--accent-primary)] focus:ring-opacity-50 transition-all"
               disabled={isLoading}
             />
             <button
               type="submit"
-              disabled={!question.trim() || isLoading}
-              className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-purple-600 dark:hover:text-purple-400 disabled:opacity-50 disabled:hover:text-gray-400"
-              aria-label="Submit question"
+              disabled={isLoading || !question.trim()}
+              className={`absolute right-3 top-1/2 transform -translate-y-1/2 px-3 py-1.5 rounded-md ${
+                isLoading || !question.trim()
+                  ? 'bg-[var(--button-disabled-bg)] text-[var(--button-disabled-text)] cursor-not-allowed'
+                  : 'bg-[var(--button-primary-bg)] text-[var(--button-primary-text)] hover:bg-[var(--button-primary-bg-hover)]'
+              } transition-colors`}
             >
-              <FaArrowRight />
+              {isLoading ? (
+                <div className="w-4 h-4 rounded-full border-2 border-t-transparent border-[var(--button-primary-text)] animate-spin" />
+              ) : (
+                messages.ask?.askButton || 'Ask'
+              )}
             </button>
           </div>
-
+          
+          {/* Deep Research toggle */}
           <div className="flex items-center mt-2 justify-between">
             <div className="group relative">
               <label className="flex items-center cursor-pointer">
@@ -618,8 +633,8 @@ const Ask: React.FC<AskProps> = ({ repoUrl, githubToken, gitlabToken, bitbucketT
               <span className="text-xs text-gray-500 dark:text-gray-400">
                 {deepResearch
                   ? (researchIteration === 0
-                      ? "Planning research approach..."
-                      : `Research iteration ${researchIteration} in progress...`)
+                    ? "Planning research approach..."
+                    : `Research iteration ${researchIteration} in progress...`)
                   : "Thinking..."}
               </span>
             </div>
@@ -704,6 +719,24 @@ const Ask: React.FC<AskProps> = ({ repoUrl, githubToken, gitlabToken, bitbucketT
           </div>
         )}
       </div>
+
+      {/* Model Selection Modal */}
+      <ModelSelectionModal
+        isOpen={isModelSelectionModalOpen}
+        onClose={() => setIsModelSelectionModalOpen(false)}
+        provider={selectedProvider}
+        setProvider={setSelectedProvider}
+        model={selectedModel}
+        setModel={setSelectedModel}
+        isCustomModel={isCustomSelectedModel}
+        setIsCustomModel={setIsCustomSelectedModel}
+        customModel={customSelectedModel}
+        setCustomModel={setCustomSelectedModel}
+        showFileFilters={false}
+        onApply={() => {
+          console.log('Model selection applied:', selectedProvider, selectedModel);
+        }}
+      />
     </div>
   );
 };
