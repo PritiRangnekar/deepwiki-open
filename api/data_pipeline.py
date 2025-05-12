@@ -19,7 +19,7 @@ from urllib.parse import urlparse, urlunparse, quote
 logger = logging.getLogger(__name__)
 
 # Maximum token limit for OpenAI embedding models
-MAX_EMBEDDING_TOKENS = 8192
+MAX_EMBEDDING_TOKENS = 25000
 
 def count_tokens(text: str, local_ollama: bool = False) -> int:
     """
@@ -698,4 +698,4 @@ class DatabaseManager:
         Returns:
             List[Document]: List of Document objects
         """
-        return self.prepare_database(repo_url_or_path, type, access_token)
+        return self.prepare_database(repo_url_or_path, access_token)
