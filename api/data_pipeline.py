@@ -11,8 +11,9 @@ import re
 import glob
 from adalflow.utils import get_adalflow_default_root_path
 from adalflow.core.db import LocalDB
-from api.config import app_configs, generator_config, embedder_config
+from api.config import configs
 from api.ollama_patch import OllamaDocumentProcessor
+from urllib.parse import urlparse, urlunparse, quote
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -20,19 +21,19 @@ logger = logging.getLogger(__name__)
 # Maximum token limit for OpenAI embedding models
 MAX_EMBEDDING_TOKENS = 25000
 
-def count_tokens(text: str) -> int:
+def count_tokens(text: str, local_ollama: bool = False) -> int:
     """
     Count the number of tokens in a text string using tiktoken.
 
     Args:
         text (str): The text to count tokens for.
+        local_ollama (bool, optional): Whether using local Ollama embeddings. Default is False.
 
     Returns:
         int: The number of tokens in the text.
     """
     try:
-        # Select the appropriate encoding based on the model mode
-        if (embedder_config.is_local()):
+        if local_ollama:
             encoding = tiktoken.get_encoding("cl100k_base")
         else:
             encoding = tiktoken.encoding_for_model("text-embedding-3-small")
@@ -44,7 +45,7 @@ def count_tokens(text: str) -> int:
         # Rough approximation: 4 characters per token
         return len(text) // 4
 
-def download_repo(repo_url: str, local_path: str, access_token: str = None):
+def download_repo(repo_url: str, local_path: str, type: str = "github", access_token: str = None) -> str:
     """
     Downloads a Git repository (GitHub, GitLab, or Bitbucket) to a specified local path.
 
@@ -78,16 +79,17 @@ def download_repo(repo_url: str, local_path: str, access_token: str = None):
         # Prepare the clone URL with access token if provided
         clone_url = repo_url
         if access_token:
+            parsed = urlparse(repo_url)
             # Determine the repository type and format the URL accordingly
-            if "github.com" in repo_url:
+            if type == "github":
                 # Format: https://{token}@github.com/owner/repo.git
-                clone_url = repo_url.replace("https://", f"https://{access_token}@")
-            elif "gitlab.com" in repo_url:
-                # Format: https://oauth2:{token}@gitlab.com/owner/repo.git
-                clone_url = repo_url.replace("https://", f"https://oauth2:{access_token}@")
-            elif "bitbucket.org" in repo_url:
+                clone_url = urlunparse((parsed.scheme, f"{access_token}@{parsed.netloc}", parsed.path, '', '', ''))
+            elif type == "gitlab":
+                # Format: https://oauth2:{token}@gitlab.com/owner/repo.git    
+                clone_url = urlunparse((parsed.scheme, f"oauth2:{access_token}@{parsed.netloc}", parsed.path, '', '', ''))
+            elif type == "bitbucket":
                 # Format: https://{token}@bitbucket.org/owner/repo.git
-                clone_url = repo_url.replace("https://", f"https://{access_token}@")
+                clone_url = urlunparse((parsed.scheme, f"{access_token}@{parsed.netloc}", parsed.path, '', '', ''))
             logger.info("Using access token for authentication")
 
         # Clone the repository
@@ -115,12 +117,17 @@ def download_repo(repo_url: str, local_path: str, access_token: str = None):
 # Alias for backward compatibility
 download_github_repo = download_repo
 
-def read_all_documents(path: str):
+def read_all_documents(path: str, local_ollama: bool = False, excluded_dirs: List[str] = None, excluded_files: List[str] = None):
     """
     Recursively reads all documents in a directory and its subdirectories.
 
     Args:
         path (str): The root directory path.
+        local_ollama (bool): Whether to use local Ollama for token counting. Default is False.
+        excluded_dirs (List[str], optional): List of directories to exclude from processing. 
+            Overrides the default configuration if provided.
+        excluded_files (List[str], optional): List of file patterns to exclude from processing.
+            Overrides the default configuration if provided.
 
     Returns:
         list: A list of Document objects with metadata.
@@ -128,12 +135,19 @@ def read_all_documents(path: str):
     documents = []
     # File extensions to look for, prioritizing code files
     code_extensions = [".py", ".js", ".ts", ".java", ".cpp", ".c", ".go", ".rs",
-                      ".jsx", ".tsx", ".html", ".css", ".php", ".swift", ".cs"]
+                       ".jsx", ".tsx", ".html", ".css", ".php", ".swift", ".cs"]
     doc_extensions = [".md", ".txt", ".rst", ".json", ".yaml", ".yml"]
 
-    # Get excluded files and directories from config
-    excluded_dirs = app_configs.get("file_filters", {}).get("excluded_dirs", [".venv", "node_modules"])
-    excluded_files = app_configs.get("file_filters", {}).get("excluded_files", ["package-lock.json"])
+    # Get excluded files and directories from config or use provided values
+    default_excluded_dirs = configs.get("file_filters", {}).get("excluded_dirs", [".venv", "node_modules"])
+    default_excluded_files = configs.get("file_filters", {}).get("excluded_files", ["package-lock.json"])
+    
+    # Use custom exclusions if provided, otherwise use defaults
+    excluded_dirs = excluded_dirs if excluded_dirs is not None else default_excluded_dirs
+    excluded_files = excluded_files if excluded_files is not None else default_excluded_files
+    
+    logger.info(f"Using excluded directories: {excluded_dirs}")
+    logger.info(f"Using excluded files: {excluded_files}")
 
     logger.info(f"Reading documents from {path}")
 
@@ -163,7 +177,7 @@ def read_all_documents(path: str):
                     )
 
                     # Check token count
-                    token_count = count_tokens(content)
+                    token_count = count_tokens(content, local_ollama)
                     if token_count > MAX_EMBEDDING_TOKENS:
                         logger.warning(f"Skipping large file {relative_path}: Token count ({token_count}) exceeds limit")
                         continue
@@ -202,7 +216,7 @@ def read_all_documents(path: str):
                     relative_path = os.path.relpath(file_path, path)
 
                     # Check token count
-                    token_count = count_tokens(content)
+                    token_count = count_tokens(content, local_ollama)
                     if token_count > MAX_EMBEDDING_TOKENS:
                         logger.warning(f"Skipping large file {relative_path}: Token count ({token_count}) exceeds limit")
                         continue
@@ -225,29 +239,33 @@ def read_all_documents(path: str):
     logger.info(f"Found {len(documents)} documents")
     return documents
 
-def prepare_data_pipeline():
+def prepare_data_pipeline(local_ollama: bool = False):
     """
     Creates and returns the data transformation pipeline.
+    
+    Args:
+        local_ollama (bool): Whether to use local Ollama for embedding (default: False)
     
     Returns:
         adal.Sequential: The data transformation pipeline
     """
-    splitter = TextSplitter(**app_configs["text_splitter"])
+    splitter = TextSplitter(**configs["text_splitter"])
     
-    
-    # Create embedder
-    embedder = adal.Embedder(
-        model_client=embedder_config.get_client(),
-        model_kwargs=embedder_config.model_kwargs,
-    )
-    
-    # Select the appropriate embedder transformer based on the current model mode
-    if embedder_config.is_local():
+    if local_ollama:
+        # Use Ollama embedder
+        embedder = adal.Embedder(
+            model_client=configs["embedder_ollama"]["model_client"](),
+            model_kwargs=configs["embedder_ollama"]["model_kwargs"],
+        )
         embedder_transformer = OllamaDocumentProcessor(embedder=embedder)
     else:
+        # Use OpenAI embedder
+        embedder = adal.Embedder(
+            model_client=configs["embedder"]["model_client"](),
+            model_kwargs=configs["embedder"]["model_kwargs"],
+        )
         embedder_transformer = ToEmbeddings(
-            embedder=embedder, 
-            batch_size=embedder_config.batch_size 
+            embedder=embedder, batch_size=configs["embedder"]["batch_size"]
         )
     
     data_transformer = adal.Sequential(
@@ -256,7 +274,7 @@ def prepare_data_pipeline():
     return data_transformer
 
 def transform_documents_and_save_to_db(
-    documents: List[Document], db_path: str
+    documents: List[Document], db_path: str, local_ollama: bool = False
 ) -> LocalDB:
     """
     Transforms a list of documents and saves them to a local database.
@@ -264,9 +282,10 @@ def transform_documents_and_save_to_db(
     Args:
         documents (list): A list of `Document` objects.
         db_path (str): The path to the local database file.
+        local_ollama (bool): Whether to use local Ollama for embedding (default: False)
     """
     # Get the data transformer
-    data_transformer = prepare_data_pipeline()
+    data_transformer = prepare_data_pipeline(local_ollama)
 
     # Save the documents to a local database
     db = LocalDB()
@@ -353,46 +372,40 @@ def get_github_file_content(repo_url: str, file_path: str, access_token: str = N
 
 def get_gitlab_file_content(repo_url: str, file_path: str, access_token: str = None) -> str:
     """
-    Retrieves the content of a file from a GitLab repository using the GitLab API.
+    Retrieves the content of a file from a GitLab repository (cloud or self-hosted).
 
     Args:
-        repo_url (str): The URL of the GitLab repository (e.g., "https://gitlab.com/username/repo")
-        file_path (str): The path to the file within the repository (e.g., "src/main.py")
-        access_token (str, optional): GitLab personal access token for private repositories
+        repo_url (str): The GitLab repo URL (e.g., "https://gitlab.com/username/repo" or "http://localhost/group/project")
+        file_path (str): File path within the repository (e.g., "src/main.py")
+        access_token (str, optional): GitLab personal access token
 
     Returns:
-        str: The content of the file as a string
+        str: File content
 
     Raises:
-        ValueError: If the file cannot be fetched or if the URL is not a valid GitLab URL
+        ValueError: If anything fails
     """
     try:
-        # Extract owner and repo name from GitLab URL
-        if not (repo_url.startswith("https://gitlab.com/") or repo_url.startswith("http://gitlab.com/")):
+        # Parse and validate the URL
+        parsed_url = urlparse(repo_url)
+        if not parsed_url.scheme or not parsed_url.netloc:
             raise ValueError("Not a valid GitLab repository URL")
 
-        parts = repo_url.rstrip('/').split('/')
-        if len(parts) < 5:
-            raise ValueError("Invalid GitLab URL format")
+        gitlab_domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        if parsed_url.port not in (None, 80, 443):
+            gitlab_domain += f":{parsed_url.port}"
+        path_parts = parsed_url.path.strip("/").split("/")
+        if len(path_parts) < 2:
+            raise ValueError("Invalid GitLab URL format — expected something like https://gitlab.domain.com/group/project")
 
-        # For GitLab, the URL format can be:
-        # - https://gitlab.com/username/repo
-        # - https://gitlab.com/group/subgroup/repo
-        # We need to extract the project path with namespace
+        # Build project path and encode for API
+        project_path = "/".join(path_parts).replace(".git", "")
+        encoded_project_path = quote(project_path, safe='')
 
-        # Remove the domain part
-        path_parts = parts[3:]
-        # Join the remaining parts to get the project path with namespace
-        project_path = '/'.join(path_parts).replace(".git", "")
-        # URL encode the path for API use
-        encoded_project_path = project_path.replace('/', '%2F')
+        # Encode file path
+        encoded_file_path = quote(file_path, safe='')
 
-        # Use GitLab API to get file content
-        # The API endpoint for getting file content is: /api/v4/projects/{encoded_project_path}/repository/files/{encoded_file_path}/raw
-        encoded_file_path = file_path.replace('/', '%2F')
-        api_url = f"https://gitlab.com/api/v4/projects/{encoded_project_path}/repository/files/{encoded_file_path}/raw?ref=main"
-
-        # Prepare curl command with authentication if token is provided
+        api_url = f"{gitlab_domain}/api/v4/projects/{encoded_project_path}/repository/files/{encoded_file_path}/raw?ref={default_branch}"
         curl_cmd = ["curl", "-s"]
         if access_token:
             curl_cmd.extend(["-H", f"PRIVATE-TOKEN: {access_token}"])
@@ -406,37 +419,14 @@ def get_gitlab_file_content(repo_url: str, file_path: str, access_token: str = N
             stderr=subprocess.PIPE,
         )
 
-        # GitLab API returns the raw file content directly
         content = result.stdout.decode("utf-8")
 
-        # Check if we got an error response (GitLab returns JSON for errors)
-        if content.startswith('{') and '"message":' in content:
+        # Check for GitLab error response (JSON instead of raw file)
+        if content.startswith("{") and '"message":' in content:
             try:
                 error_data = json.loads(content)
                 if "message" in error_data:
-                    # Try with 'master' branch if 'main' failed
-                    api_url = f"https://gitlab.com/api/v4/projects/{encoded_project_path}/repository/files/{encoded_file_path}/raw?ref=master"
-                    logger.info(f"Retrying with master branch: {api_url}")
-
-                    # Prepare curl command for retry
-                    curl_cmd = ["curl", "-s"]
-                    if access_token:
-                        curl_cmd.extend(["-H", f"PRIVATE-TOKEN: {access_token}"])
-                    curl_cmd.append(api_url)
-
-                    result = subprocess.run(
-                        curl_cmd,
-                        check=True,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                    )
-                    content = result.stdout.decode("utf-8")
-
-                    # Check again for error
-                    if content.startswith('{') and '"message":' in content:
-                        error_data = json.loads(content)
-                        if "message" in error_data:
-                            raise ValueError(f"GitLab API error: {error_data['message']}")
+                    raise ValueError(f"GitLab API error: {error_data['message']}")
             except json.JSONDecodeError:
                 # If it's not valid JSON, it's probably the file content
                 pass
@@ -515,7 +505,7 @@ def get_bitbucket_file_content(repo_url: str, file_path: str, access_token: str 
         raise ValueError(f"Failed to get file content: {str(e)}")
 
 
-def get_file_content(repo_url: str, file_path: str, access_token: str = None) -> str:
+def get_file_content(repo_url: str, file_path: str, type: str = "github", access_token: str = None) -> str:
     """
     Retrieves the content of a file from a Git repository (GitHub or GitLab).
 
@@ -530,11 +520,11 @@ def get_file_content(repo_url: str, file_path: str, access_token: str = None) ->
     Raises:
         ValueError: If the file cannot be fetched or if the URL is not valid
     """
-    if "github.com" in repo_url:
+    if type == "github":
         return get_github_file_content(repo_url, file_path, access_token)
-    elif "gitlab.com" in repo_url:
+    elif type == "gitlab":
         return get_gitlab_file_content(repo_url, file_path, access_token)
-    elif "bitbucket.org" in repo_url:
+    elif type == "bitbucket":
         return get_bitbucket_file_content(repo_url, file_path, access_token)
     else:
         raise ValueError("Unsupported repository URL. Only GitHub and GitLab are supported.")
@@ -549,20 +539,24 @@ class DatabaseManager:
         self.repo_url_or_path = None
         self.repo_paths = None
 
-    def prepare_database(self, repo_url_or_path: str, access_token: str = None) -> List[Document]:
+    def prepare_database(self, repo_url_or_path: str, type: str = "github", access_token: str = None, local_ollama: bool = False, 
+                       excluded_dirs: List[str] = None, excluded_files: List[str] = None) -> List[Document]:
         """
         Create a new database from the repository.
 
         Args:
             repo_url_or_path (str): The URL or local path of the repository
             access_token (str, optional): Access token for private repositories
+            local_ollama (bool): Whether to use local Ollama for embedding (default: False)
+            excluded_dirs (List[str], optional): List of directories to exclude from processing
+            excluded_files (List[str], optional): List of file patterns to exclude from processing
 
         Returns:
             List[Document]: List of Document objects
         """
         self.reset_database()
-        self._create_repo(repo_url_or_path, access_token)
-        return self.prepare_db_index()
+        self._create_repo(repo_url_or_path, type, access_token)
+        return self.prepare_db_index(local_ollama=local_ollama, excluded_dirs=excluded_dirs, excluded_files=excluded_files)
 
     def reset_database(self):
         """
@@ -572,7 +566,7 @@ class DatabaseManager:
         self.repo_url_or_path = None
         self.repo_paths = None
 
-    def _create_repo(self, repo_url_or_path: str, access_token: str = None) -> None:
+    def _create_repo(self, repo_url_or_path: str, type: str = "github", access_token: str = None) -> None:
         """
         Download and prepare all paths.
         Paths:
@@ -592,14 +586,14 @@ class DatabaseManager:
             # url
             if repo_url_or_path.startswith("https://") or repo_url_or_path.startswith("http://"):
                 # Extract repo name based on the URL format
-                if "github.com" in repo_url_or_path:
+                if type == "github":
                     # GitHub URL format: https://github.com/owner/repo
                     repo_name = repo_url_or_path.split("/")[-1].replace(".git", "")
-                elif "gitlab.com" in repo_url_or_path:
+                elif type == "gitlab":
                     # GitLab URL format: https://gitlab.com/owner/repo or https://gitlab.com/group/subgroup/repo
                     # Use the last part of the URL as the repo name
                     repo_name = repo_url_or_path.split("/")[-1].replace(".git", "")
-                elif "bitbucket.org" in repo_url_or_path:
+                elif type == "bitbucket":
                     # Bitbucket URL format: https://bitbucket.org/owner/repo
                     repo_name = repo_url_or_path.split("/")[-1].replace(".git", "")
                 else:
@@ -611,7 +605,7 @@ class DatabaseManager:
                 # Check if the repository directory already exists and is not empty
                 if not (os.path.exists(save_repo_dir) and os.listdir(save_repo_dir)):
                     # Only download if the repository doesn't exist or is empty
-                    download_repo(repo_url_or_path, save_repo_dir, access_token)
+                    download_repo(repo_url_or_path, save_repo_dir, type, access_token)
                 else:
                     logger.info(f"Repository already exists at {save_repo_dir}. Using existing repository.")
             else:  # local path
@@ -633,9 +627,14 @@ class DatabaseManager:
             logger.error(f"Failed to create repository structure: {e}")
             raise
 
-    def prepare_db_index(self) -> List[Document]:
+    def prepare_db_index(self, local_ollama: bool = False, excluded_dirs: List[str] = None, excluded_files: List[str] = None) -> List[Document]:
         """
         Prepare the indexed database for the repository.
+        
+        Args:
+            local_ollama (bool): Whether to use local Ollama for embedding (default: False)
+            excluded_dirs (List[str], optional): List of directories to exclude from processing
+            excluded_files (List[str], optional): List of file patterns to exclude from processing
             
         Returns:
             List[Document]: List of Document objects
@@ -663,9 +662,14 @@ class DatabaseManager:
 
         # prepare the database
         logger.info("Creating new database...")
-        documents = read_all_documents(self.repo_paths["save_repo_dir"])
+        documents = read_all_documents(
+            self.repo_paths["save_repo_dir"], 
+            local_ollama=local_ollama,
+            excluded_dirs=excluded_dirs,
+            excluded_files=excluded_files
+        )
         self.db = transform_documents_and_save_to_db(
-            documents, self.repo_paths["save_db_file"]
+            documents, self.repo_paths["save_db_file"], local_ollama=local_ollama
         )
         logger.info(f"Total documents: {len(documents)}")
         transformed_docs = self.db.get_transformed_data(key="split_and_embed")
@@ -682,7 +686,7 @@ class DatabaseManager:
             
         return transformed_docs
 
-    def prepare_retriever(self, repo_url_or_path: str, access_token: str = None):
+    def prepare_retriever(self, repo_url_or_path: str, type: str = "github", access_token: str = None):
         """
         Prepare the retriever for a repository.
         This is a compatibility method for the isolated API.
@@ -695,4 +699,3 @@ class DatabaseManager:
             List[Document]: List of Document objects
         """
         return self.prepare_database(repo_url_or_path, access_token)
-    
