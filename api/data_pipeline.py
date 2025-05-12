@@ -648,6 +648,14 @@ class DatabaseManager:
                 documents = self.db.get_transformed_data(key="split_and_embed")
                 if documents:
                     logger.info(f"Loaded {len(documents)} documents from existing database")
+                    # Print document details
+                    for i, doc in enumerate(documents):
+                        logger.info(f"Document {i+1}:")
+                        logger.info(f"  Title: {doc.meta_data.get('title', 'N/A')}")
+                        logger.info(f"  Type: {doc.meta_data.get('type', 'N/A')}")
+                        logger.info(f"  Is Code: {doc.meta_data.get('is_code', 'N/A')}")
+                        logger.info(f"  Token Count: {doc.meta_data.get('token_count', 'N/A')}")
+                        logger.info(f"  Text Preview: {doc.text[:200]}...")
                     return documents
             except Exception as e:
                 logger.error(f"Error loading existing database: {e}")
@@ -662,6 +670,16 @@ class DatabaseManager:
         logger.info(f"Total documents: {len(documents)}")
         transformed_docs = self.db.get_transformed_data(key="split_and_embed")
         logger.info(f"Total transformed documents: {len(transformed_docs)}")
+        
+        # Print document details for new database
+        for i, doc in enumerate(transformed_docs):
+            logger.info(f"Document {i+1}:")
+            logger.info(f"  Title: {doc.meta_data.get('title', 'N/A')}")
+            logger.info(f"  Type: {doc.meta_data.get('type', 'N/A')}")
+            logger.info(f"  Is Code: {doc.meta_data.get('is_code', 'N/A')}")
+            logger.info(f"  Token Count: {doc.meta_data.get('token_count', 'N/A')}")
+            logger.info(f"  Text Preview: {doc.text[:200]}...")
+            
         return transformed_docs
 
     def prepare_retriever(self, repo_url_or_path: str, access_token: str = None):
